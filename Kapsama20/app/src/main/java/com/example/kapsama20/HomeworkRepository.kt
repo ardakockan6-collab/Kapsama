@@ -8,6 +8,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 data class Homework(
     val id: Long,
@@ -59,6 +60,31 @@ object HomeworkRepository {
             HomeworkResult(cached, true, "Bağlantı yok; kayıtlı ödevler gösteriliyor.")
         } catch (_: org.json.JSONException) {
             HomeworkResult(cached, true, "Ödev verisi okunamadı.")
+        }
+    }
+
+    suspend fun loadSubmittedIds(context: Context, studentId: String): Set<Long> = withContext(Dispatchers.IO) {
+        val endpoint = BuildConfig.SUPABASE_URL.trimEnd('/')
+        val key = BuildConfig.SUPABASE_ANON_KEY
+        if (!endpoint.startsWith("https://") || key.isBlank()) return@withContext emptySet()
+        val encodedStudent = URLEncoder.encode(studentId, Charsets.UTF_8.name())
+        val url = "$endpoint/rest/v1/odev_durumu?select=odev_id&ogrenci_id=eq.$encodedStudent&acildi=eq.true"
+        try {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            try {
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 15_000
+                connection.setRequestProperty("apikey", key)
+                if (key.startsWith("eyJ")) connection.setRequestProperty("Authorization", "Bearer $key")
+                if (connection.responseCode !in 200..299) return@withContext emptySet()
+                val rows = JSONArray(connection.inputStream.bufferedReader().use { it.readText() })
+                buildSet { for (index in 0 until rows.length()) add(rows.getJSONObject(index).getLong("odev_id")) }
+            } finally {
+                connection.disconnect()
+            }
+        } catch (_: Exception) {
+            emptySet()
         }
     }
 

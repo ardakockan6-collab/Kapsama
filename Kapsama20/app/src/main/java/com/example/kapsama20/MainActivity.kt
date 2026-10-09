@@ -29,6 +29,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
@@ -38,6 +39,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import android.net.Uri
 import android.content.Intent
 import android.widget.MediaController
@@ -115,6 +117,8 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
     var homework by remember { mutableStateOf<List<Homework>>(emptyList()) }
     var homeworkLoading by remember { mutableStateOf(true) }
     var homeworkMessage by remember { mutableStateOf<String?>(null) }
+    val submittedHomeworkIds = remember { mutableStateListOf<Long>() }
+    val submittingHomeworkIds = remember { mutableStateListOf<Long>() }
     val scope = rememberCoroutineScope()
     var uploadId by remember { mutableStateOf<java.util.UUID?>(null) }
     var uploadIsDemo by remember { mutableStateOf(false) }
@@ -125,8 +129,40 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
         homeworkLoading = true
         val result = HomeworkRepository.load(context)
         homework = result.items
+        val remoteSubmitted = HomeworkRepository.loadSubmittedIds(context, currentStudent.number)
+        submittedHomeworkIds.clear()
+        submittedHomeworkIds.addAll(remoteSubmitted)
         homeworkMessage = result.message
         homeworkLoading = false
+    }
+
+    fun submitHomework(homeworkId: Long) {
+        if (homeworkId in submittedHomeworkIds || homeworkId in submittingHomeworkIds) return
+        val work = OneTimeWorkRequestBuilder<HomeworkSubmitWorker>()
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setInputData(workDataOf(
+                HomeworkSubmitWorker.KEY_HOMEWORK_ID to homeworkId,
+                HomeworkSubmitWorker.KEY_STUDENT_ID to currentStudent.number
+            ))
+            .build()
+        submittingHomeworkIds.add(homeworkId)
+        homeworkMessage = "Ödev öğretmene gönderilmek üzere kuyruğa alındı."
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "homework-${currentStudent.number}-$homeworkId",
+            ExistingWorkPolicy.REPLACE,
+            work
+        )
+        scope.launch {
+            val info = WorkManager.getInstance(context).getWorkInfoByIdFlow(work.id)
+                .first { it != null && it.state.isFinished }
+            submittingHomeworkIds.remove(homeworkId)
+            if (info?.state == WorkInfo.State.SUCCEEDED) {
+                if (homeworkId !in submittedHomeworkIds) submittedHomeworkIds.add(homeworkId)
+                homeworkMessage = "Ödev öğretmene gönderildi."
+            } else {
+                homeworkMessage = info?.outputData?.getString("error") ?: "Ödev gönderilemedi."
+            }
+        }
     }
 
     LaunchedEffect(Unit) { refreshHomework() }
@@ -228,6 +264,9 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
                 onNotice = { showNotice = true }, acildi = acildi,
                 homework = homework, homeworkLoading = homeworkLoading,
                 homeworkMessage = homeworkMessage,
+                submittedHomeworkIds = submittedHomeworkIds,
+                submittingHomeworkIds = submittingHomeworkIds,
+                onSubmitHomework = ::submitHomework,
                 onClassName = { selected ->
                     className = selected
                     prefs.edit().putString("class_name", selected).apply()
@@ -312,6 +351,8 @@ private fun HomeScreen(
     modifier: Modifier, student: Student, records: List<CourseRecord>, notice: AbsenceReport?,
     onNotice: () -> Unit, acildi: Boolean,
     homework: List<Homework>, homeworkLoading: Boolean, homeworkMessage: String?,
+    submittedHomeworkIds: List<Long>, submittingHomeworkIds: List<Long>,
+    onSubmitHomework: (Long) -> Unit,
     onClassName: (String) -> Unit,
     onRefreshHomework: () -> Unit, onVideoStarted: () -> Unit
 ) {
@@ -367,7 +408,14 @@ private fun HomeScreen(
             if (homeworkMessage != null) Text(homeworkMessage, color = MaterialTheme.colorScheme.primary)
             if (!homeworkLoading && visibleHomework.isEmpty()) Text("Bu şube için ödev yok.")
         }
-        items(visibleHomework, key = { "homework-${it.id}" }) { item -> HomeworkCard(item) }
+        items(visibleHomework, key = { "homework-${it.id}" }) { item ->
+            HomeworkCard(
+                homework = item,
+                submitted = item.id in submittedHomeworkIds,
+                submitting = item.id in submittingHomeworkIds,
+                onSubmit = { onSubmitHomework(item.id) }
+            )
+        }
         item {
             Text("Cihazdaki Ders Videosu", style = MaterialTheme.typography.titleLarge)
             OfflineVideo(onStarted = onVideoStarted)
@@ -377,7 +425,7 @@ private fun HomeScreen(
 }
 
 @Composable
-private fun HomeworkCard(homework: Homework) {
+private fun HomeworkCard(homework: Homework, submitted: Boolean, submitting: Boolean, onSubmit: () -> Unit) {
     val context = LocalContext.current
     val videoUrl = homework.videoUrl?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
@@ -392,6 +440,21 @@ private fun HomeworkCard(homework: Homework) {
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(videoUrl))
                     runCatching { context.startActivity(intent) }
                 }) { Text("Bağlantıyı aç") }
+            }
+            Button(
+                onClick = onSubmit,
+                enabled = !submitted && !submitting,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (submitting) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(when {
+                    submitted -> "Öğretmene gönderildi"
+                    submitting -> "Gönderiliyor"
+                    else -> "Tamamladım, öğretmene gönder"
+                })
             }
         }
     }
