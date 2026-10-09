@@ -45,7 +45,10 @@ import android.content.Intent
 import android.widget.MediaController
 import kotlin.random.Random
 
-data class Student(val name: String, val initials: String, val className: String, val number: String)
+data class Student(
+    val name: String, val initials: String, val className: String, val number: String,
+    val gradeLevel: Int? = null
+)
 data class CourseRecord(val course: String, val schedule: String, val teacher: String, val status: String)
 data class AbsenceReport(val teacher: String, val note: String, val sentAt: Long)
 data class RadioReading(
@@ -53,7 +56,6 @@ data class RadioReading(
     val mbps: Double? = null, val isDemo: Boolean = false
 )
 
-private val student = Student("Ali", "AE", "11-B", "482")
 private val records = listOf(
     CourseRecord("Fizik Laboratuvarı", "Salı • 09:40", "Ahmet Hoca", "Kaçırıldı"),
     CourseRecord("Matematik", "Dün • 11:30", "Ayşe Hoca", "Kaçırıldı"),
@@ -97,10 +99,44 @@ private fun StudentTheme(content: @Composable () -> Unit) {
 @Composable
 private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var authSession by remember { mutableStateOf<AuthSession?>(null) }
+    var checkingSession by remember { mutableStateOf(true) }
+    var loginError by remember { mutableStateOf<String?>(null) }
+    var loginBusy by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        authSession = AuthRepository.restore(context)
+        checkingSession = false
+    }
+    if (checkingSession) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        return
+    }
+    val session = authSession
+    if (session == null) {
+        LoginScreen(
+            busy = loginBusy, error = loginError,
+            onLogin = { email, password ->
+                if (!loginBusy) scope.launch {
+                    loginBusy = true
+                    loginError = null
+                    try { authSession = AuthRepository.signIn(context, email, password) }
+                    catch (e: Exception) { loginError = e.message ?: "Giriş yapılamadı." }
+                    finally { loginBusy = false }
+                }
+            }
+        )
+        return
+    }
     val prefs = remember { context.getSharedPreferences("student", Context.MODE_PRIVATE) }
-    var className by remember { mutableStateOf(prefs.getString("class_name", student.className) ?: student.className) }
-    val currentStudent = student.copy(className = className)
-    var section by remember { mutableStateOf("A") }
+    var className by remember(session.id) {
+        mutableStateOf(prefs.getString("class_name_${session.id}", session.className) ?: session.className)
+    }
+    val displayName = session.name
+    val initials = displayName.split(Regex("\\s+")).filter { it.isNotBlank() }.take(2)
+        .joinToString("") { it.take(1).uppercase() }.ifBlank { "Ö" }
+    var gradeLevel by remember(session.id) { mutableStateOf<Int?>(null) }
+    val currentStudent = Student(displayName, initials, className, session.studentNumber, gradeLevel)
     var tab by remember { mutableStateOf(0) }
     var query by remember { mutableStateOf("") }
     var auto by remember { mutableStateOf(false) }
@@ -119,17 +155,15 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
     var homeworkMessage by remember { mutableStateOf<String?>(null) }
     val submittedHomeworkIds = remember { mutableStateListOf<Long>() }
     val submittingHomeworkIds = remember { mutableStateListOf<Long>() }
-    val scope = rememberCoroutineScope()
     var uploadId by remember { mutableStateOf<java.util.UUID?>(null) }
     var uploadIsDemo by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) { section = prefs.getString("section", "A") ?: "A" }
 
     suspend fun refreshHomework() {
         homeworkLoading = true
         val result = HomeworkRepository.load(context)
         homework = result.items
-        val remoteSubmitted = HomeworkRepository.loadSubmittedIds(context, currentStudent.number)
+        gradeLevel = HomeworkRepository.loadStudentGrade(context, session.id)
+        val remoteSubmitted = HomeworkRepository.loadSubmittedIds(context, session.id)
         submittedHomeworkIds.clear()
         submittedHomeworkIds.addAll(remoteSubmitted)
         homeworkMessage = result.message
@@ -142,13 +176,13 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .setInputData(workDataOf(
                 HomeworkSubmitWorker.KEY_HOMEWORK_ID to homeworkId,
-                HomeworkSubmitWorker.KEY_STUDENT_ID to currentStudent.number
+                HomeworkSubmitWorker.KEY_STUDENT_ID to session.id
             ))
             .build()
         submittingHomeworkIds.add(homeworkId)
         homeworkMessage = "Ödev öğretmene gönderilmek üzere kuyruğa alındı."
         WorkManager.getInstance(context).enqueueUniqueWork(
-            "homework-${currentStudent.number}-$homeworkId",
+            "homework-${session.id}-$homeworkId",
             ExistingWorkPolicy.REPLACE,
             work
         )
@@ -193,7 +227,7 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
                 val work = OneTimeWorkRequestBuilder<UploadWorker>()
                     .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                     .setInputData(workDataOf(
-                        "section" to section,
+                        UploadWorker.KEY_STUDENT_ID to session.id,
                         "rsrp" to (value.rsrp ?: Int.MIN_VALUE),
                         "sinr" to (value.sinr ?: Int.MIN_VALUE),
                         "rsrq" to (value.rsrq ?: Int.MIN_VALUE),
@@ -218,7 +252,7 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
         }
     }
 
-    LaunchedEffect(auto, hasCellPermission, section, demoMode) {
+    LaunchedEffect(auto, hasCellPermission, session.id, demoMode) {
         while (auto && (hasCellPermission || demoMode)) {
             measure()
             delay(10_000)
@@ -234,7 +268,10 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
     }
 
     Scaffold(
-        topBar = { TopBar(currentStudent, query, { query = it }) },
+        topBar = { TopBar(currentStudent, query, { query = it }, onSignOut = {
+            AuthRepository.signOut(context)
+            authSession = null
+        }) },
         bottomBar = {
             NavigationBar(modifier = Modifier.height(80.dp)) {
                 listOf("Derslerim", "Yoklama", "Rapor").forEachIndexed { index, label ->
@@ -269,16 +306,13 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
                 onSubmitHomework = ::submitHomework,
                 onClassName = { selected ->
                     className = selected
-                    prefs.edit().putString("class_name", selected).apply()
+                    prefs.edit().putString("class_name_${session.id}", selected).apply()
                 },
                 onRefreshHomework = { scope.launch { refreshHomework() } },
                 onVideoStarted = { acildi = true }
             )
             1 -> MeasurementScreen(
-                Modifier.padding(padding), section, { chosen ->
-                    section = chosen
-                    prefs.edit().putString("section", chosen).apply()
-                }, reading, measuring, auto, { auto = it }, demoMode, { selected ->
+                Modifier.padding(padding), currentStudent.name, reading, measuring, auto, { auto = it }, demoMode, { selected ->
                     demoMode = selected
                     reading = null
                     message = if (selected) "DEMO: Değerler temsili olacak." else ""
@@ -322,7 +356,42 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
 }
 
 @Composable
-private fun TopBar(student: Student, query: String, onQuery: (String) -> Unit) {
+private fun LoginScreen(busy: Boolean, error: String?, onLogin: (String, String) -> Unit) {
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("Öğrenci Girişi", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(20.dp))
+        OutlinedTextField(email, { email = it }, Modifier.fillMaxWidth(), label = { Text("E-posta") }, singleLine = true)
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Şifre") },
+            singleLine = true, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
+        )
+        if (error != null) {
+            Spacer(Modifier.height(8.dp))
+            Text(error, color = MaterialTheme.colorScheme.error)
+        }
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { onLogin(email, password) },
+            enabled = !busy && email.isNotBlank() && password.isNotBlank(),
+            modifier = Modifier.fillMaxWidth().height(52.dp)
+        ) {
+            if (busy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+            else Text("Giriş yap")
+        }
+        Spacer(Modifier.height(12.dp))
+        Text("Hesap bilgilerini öğretmeninizden alın.", style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun TopBar(student: Student, query: String, onQuery: (String) -> Unit, onSignOut: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surface) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             TextField(
@@ -339,7 +408,7 @@ private fun TopBar(student: Student, query: String, onQuery: (String) -> Unit) {
                 )
             )
             Spacer(Modifier.width(8.dp))
-            Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.secondaryContainer) {
+            Surface(onClick = onSignOut, shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.secondaryContainer) {
                 Text(student.initials, Modifier.padding(10.dp), color = MaterialTheme.colorScheme.onSecondaryContainer)
             }
         }
@@ -365,7 +434,12 @@ private fun HomeScreen(
     var classMenuExpanded by remember { mutableStateOf(false) }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
-            Text("${student.className} SINIFI • NO: ${student.number}", color = MaterialTheme.colorScheme.primary)
+            val studentDetails = listOfNotNull(
+                student.gradeLevel?.let { "$it. sınıf" },
+                student.className.takeIf { it != "Şube seçilmedi" }?.let { "Şube: $it" },
+                student.number.takeIf { it != "—" }?.let { "NO: $it" }
+            ).joinToString(" • ")
+            if (studentDetails.isNotBlank()) Text(studentDetails, color = MaterialTheme.colorScheme.primary)
             Text("İyi günler, ${student.name}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         }
         item {
@@ -488,7 +562,7 @@ private fun CourseRow(record: CourseRecord) {
 
 @Composable
 private fun MeasurementScreen(
-    modifier: Modifier, section: String, onSection: (String) -> Unit, reading: RadioReading?,
+    modifier: Modifier, studentName: String, reading: RadioReading?,
     measuring: Boolean, auto: Boolean, onAuto: (Boolean) -> Unit,
     demoMode: Boolean, onDemo: (Boolean) -> Unit,
     hasCellPermission: Boolean, requestPermission: () -> Unit,
@@ -501,11 +575,10 @@ private fun MeasurementScreen(
             Text("Demo değerleri (temsili)", Modifier.weight(1f), fontWeight = FontWeight.Bold)
             Switch(checked = demoMode, onCheckedChange = onDemo)
         }
-        Text("Öğrenci seçimi")
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            listOf("A", "B", "C").forEachIndexed { index, value ->
-                SegmentedButton(selected = section == value, onClick = { onSection(value) },
-                    shape = SegmentedButtonDefaults.itemShape(index, 3), label = { Text(value) })
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                Text("Giriş yapan öğrenci", style = MaterialTheme.typography.labelLarge)
+                Text(studentName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

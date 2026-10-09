@@ -19,10 +19,12 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         if (!endpoint.startsWith("https://") || key.isBlank()) {
             return@withContext Result.failure(workDataOf("error" to "Supabase bağlantısı ayarlanmadı."))
         }
-        val section = inputData.getString(KEY_SECTION)
-            ?: return@withContext Result.failure(workDataOf("error" to "Öğrenci seçimi eksik."))
+        val studentId = inputData.getString(KEY_STUDENT_ID)
+            ?: return@withContext Result.failure(workDataOf("error" to "Giriş yapan öğrenci bilgisi eksik."))
+        var accessToken = AuthRepository.currentAccessToken(applicationContext)
+            ?: return@withContext Result.retry()
         val body = JSONObject().apply {
-            put("ogrenci_id", section)
+            put("ogrenci_id", studentId)
             put("zaman", Instant.ofEpochMilli(inputData.getLong(KEY_TIME, 0L)).toString())
             put("enlem", 0.0)
             put("boylam", 0.0)
@@ -31,6 +33,26 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 put(name, inputData.getInt(name, Int.MIN_VALUE).takeUnless { it == Int.MIN_VALUE } ?: JSONObject.NULL)
             }
         }
+        try {
+            var response = send(endpoint, key, accessToken, body)
+            if (response.code == 401) {
+                accessToken = AuthRepository.currentAccessToken(applicationContext, forceRefresh = true) ?: return@withContext Result.retry()
+                response = send(endpoint, key, accessToken, body)
+            }
+            when (val code = response.code) {
+                in 200..299 -> Result.success()
+                408, 429, in 500..599 -> Result.retry()
+                else -> {
+                    val pgCode = try { JSONObject(response.body).optString("code") } catch (_: Exception) { "" }
+                    Result.failure(workDataOf("error" to "Supabase HTTP $code ($pgCode): tablo alanlarını ve yazma izinlerini kontrol edin."))
+                }
+            }
+        } catch (_: IOException) {
+            Result.retry()
+        }
+    }
+
+    private fun send(endpoint: String, key: String, accessToken: String, body: JSONObject): Response {
         val connection = URL("$endpoint/rest/v1/olcumler").openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
@@ -39,26 +61,21 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             connection.setRequestProperty("apikey", key)
-            if (key.startsWith("eyJ")) connection.setRequestProperty("Authorization", "Bearer $key")
+            connection.setRequestProperty("Authorization", "Bearer $accessToken")
             connection.setRequestProperty("Prefer", "return=minimal")
             connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-            when (val code = connection.responseCode) {
-                in 200..299 -> Result.success()
-                408, 429, in 500..599 -> Result.retry()
-                else -> {
-                    val error = connection.errorStream?.bufferedReader()?.use { it.readText().take(2048) }
-                    val pgCode = try { JSONObject(error ?: "{}").optString("code") } catch (_: Exception) { "" }
-                    Result.failure(workDataOf("error" to "Supabase HTTP $code ($pgCode): tablo alanlarını ve yazma izinlerini kontrol edin."))
-                }
-            }
-        } catch (_: IOException) {
-            Result.retry()
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            return Response(code, stream?.bufferedReader()?.use { it.readText().take(2048) }.orEmpty())
         } finally {
             connection.disconnect()
         }
     }
+
+    private data class Response(val code: Int, val body: String)
+
     companion object {
-        const val KEY_SECTION = "section"
+        const val KEY_STUDENT_ID = "student_id"
         const val KEY_RSRP = "rsrp"
         const val KEY_SINR = "sinr"
         const val KEY_RSRQ = "rsrq"

@@ -22,20 +22,36 @@ class HomeworkSubmitWorker(context: Context, params: WorkerParameters) : Corouti
         if (!endpoint.startsWith("https://") || key.isBlank() || homeworkId < 0 || studentId.isBlank()) {
             return@withContext Result.failure(workDataOf("error" to "Ödev gönderim bilgileri eksik."))
         }
+        var accessToken = AuthRepository.currentAccessToken(applicationContext)
+            ?: return@withContext Result.retry()
 
         try {
             val encodedStudent = URLEncoder.encode(studentId, Charsets.UTF_8.name())
             val filter = "odev_id=eq.$homeworkId&ogrenci_id=eq.$encodedStudent"
-            val exists = request(
+            var existsResponse = request(
                 url = "$endpoint/rest/v1/odev_durumu?select=odev_id&$filter",
                 key = key,
+                accessToken = accessToken,
                 method = "GET"
-            ).let { response -> response.code in 200..299 && JSONArray(response.body).length() > 0 }
+            )
+            if (existsResponse.code == 401) {
+                accessToken = AuthRepository.currentAccessToken(applicationContext, forceRefresh = true) ?: return@withContext Result.retry()
+                existsResponse = request(
+                    url = "$endpoint/rest/v1/odev_durumu?select=odev_id&$filter",
+                    key = key, accessToken = accessToken, method = "GET"
+                )
+            }
+            if (existsResponse.code !in 200..299) {
+                return@withContext if (existsResponse.code in 500..599) Result.retry()
+                else Result.failure(workDataOf("error" to "Ödev durumu okunamadı (HTTP ${existsResponse.code})."))
+            }
+            val exists = JSONArray(existsResponse.body).length() > 0
 
-            val response = if (exists) {
+            var response = if (exists) {
                 request(
                     url = "$endpoint/rest/v1/odev_durumu?$filter",
                     key = key,
+                    accessToken = accessToken,
                     method = "PATCH",
                     body = JSONObject().put("acildi", true).toString()
                 )
@@ -43,6 +59,7 @@ class HomeworkSubmitWorker(context: Context, params: WorkerParameters) : Corouti
                 request(
                     url = "$endpoint/rest/v1/odev_durumu",
                     key = key,
+                    accessToken = accessToken,
                     method = "POST",
                     body = JSONObject()
                         .put("odev_id", homeworkId)
@@ -50,6 +67,17 @@ class HomeworkSubmitWorker(context: Context, params: WorkerParameters) : Corouti
                         .put("acildi", true)
                         .toString()
                 )
+            }
+            if (response.code == 401) {
+                accessToken = AuthRepository.currentAccessToken(applicationContext, forceRefresh = true) ?: return@withContext Result.retry()
+                response = if (exists) {
+                    request("$endpoint/rest/v1/odev_durumu?$filter", key, accessToken, "PATCH",
+                        JSONObject().put("acildi", true).toString())
+                } else {
+                    request("$endpoint/rest/v1/odev_durumu", key, accessToken, "POST",
+                        JSONObject().put("odev_id", homeworkId)
+                            .put("ogrenci_id", studentId).put("acildi", true).toString())
+                }
             }
 
             when (response.code) {
@@ -64,14 +92,14 @@ class HomeworkSubmitWorker(context: Context, params: WorkerParameters) : Corouti
         }
     }
 
-    private fun request(url: String, key: String, method: String, body: String? = null): Response {
+    private fun request(url: String, key: String, accessToken: String, method: String, body: String? = null): Response {
         val connection = URL(url).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = method
             connection.connectTimeout = 15_000
             connection.readTimeout = 15_000
             connection.setRequestProperty("apikey", key)
-            if (key.startsWith("eyJ")) connection.setRequestProperty("Authorization", "Bearer $key")
+            connection.setRequestProperty("Authorization", "Bearer $accessToken")
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             connection.setRequestProperty("Prefer", "return=minimal")
             if (body != null) {
