@@ -96,6 +96,8 @@ private fun StudentTheme(content: @Composable () -> Unit) {
 private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("student", Context.MODE_PRIVATE) }
+    var className by remember { mutableStateOf(prefs.getString("class_name", student.className) ?: student.className) }
+    val currentStudent = student.copy(className = className)
     var section by remember { mutableStateOf("A") }
     var tab by remember { mutableStateOf(0) }
     var query by remember { mutableStateOf("") }
@@ -110,11 +112,24 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
     var notice by remember { mutableStateOf<AbsenceReport?>(null) }
     var showNewLog by remember { mutableStateOf(false) }
     val localRecords = remember { mutableStateListOf<CourseRecord>() }
+    var homework by remember { mutableStateOf<List<Homework>>(emptyList()) }
+    var homeworkLoading by remember { mutableStateOf(true) }
+    var homeworkMessage by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     var uploadId by remember { mutableStateOf<java.util.UUID?>(null) }
     var uploadIsDemo by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { section = prefs.getString("section", "A") ?: "A" }
+
+    suspend fun refreshHomework() {
+        homeworkLoading = true
+        val result = HomeworkRepository.load(context)
+        homework = result.items
+        homeworkMessage = result.message
+        homeworkLoading = false
+    }
+
+    LaunchedEffect(Unit) { refreshHomework() }
 
     LaunchedEffect(uploadId, uploadIsDemo) {
         val id = uploadId ?: return@LaunchedEffect
@@ -183,7 +198,7 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
     }
 
     Scaffold(
-        topBar = { TopBar(student, query, { query = it }) },
+        topBar = { TopBar(currentStudent, query, { query = it }) },
         bottomBar = {
             NavigationBar(modifier = Modifier.height(80.dp)) {
                 listOf("Derslerim", "Yoklama", "Rapor").forEachIndexed { index, label ->
@@ -206,11 +221,18 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
     ) { padding ->
         when (tab) {
             0 -> HomeScreen(
-                Modifier.padding(padding), student,
+                Modifier.padding(padding), currentStudent,
                 (records + localRecords).filter {
                     it.course.contains(query, ignoreCase = true) || it.teacher.contains(query, ignoreCase = true)
                 }, notice,
                 onNotice = { showNotice = true }, acildi = acildi,
+                homework = homework, homeworkLoading = homeworkLoading,
+                homeworkMessage = homeworkMessage,
+                onClassName = { selected ->
+                    className = selected
+                    prefs.edit().putString("class_name", selected).apply()
+                },
+                onRefreshHomework = { scope.launch { refreshHomework() } },
                 onVideoStarted = { acildi = true }
             )
             1 -> MeasurementScreen(
@@ -288,8 +310,18 @@ private fun TopBar(student: Student, query: String, onQuery: (String) -> Unit) {
 @Composable
 private fun HomeScreen(
     modifier: Modifier, student: Student, records: List<CourseRecord>, notice: AbsenceReport?,
-    onNotice: () -> Unit, acildi: Boolean, onVideoStarted: () -> Unit
+    onNotice: () -> Unit, acildi: Boolean,
+    homework: List<Homework>, homeworkLoading: Boolean, homeworkMessage: String?,
+    onClassName: (String) -> Unit,
+    onRefreshHomework: () -> Unit, onVideoStarted: () -> Unit
 ) {
+    val visibleHomework = homework.filter { item ->
+        item.section == null || item.section.equals("Tüm şubeler", ignoreCase = true) ||
+            item.section.equals(student.className, ignoreCase = true)
+    }
+    val availableClasses = (listOf(student.className) + homework.mapNotNull { it.section }
+        .filterNot { it.equals("Tüm şubeler", ignoreCase = true) }).distinct()
+    var classMenuExpanded by remember { mutableStateOf(false) }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
             Text("${student.className} SINIFI • NO: ${student.number}", color = MaterialTheme.colorScheme.primary)
@@ -316,9 +348,51 @@ private fun HomeScreen(
         item { Text("Ders Katılım Geçmişi", style = MaterialTheme.typography.titleLarge) }
         items(records) { record -> CourseRow(record) }
         item {
-            Text("Ödevlerim", style = MaterialTheme.typography.titleLarge)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Yayınlanan Ödevler", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                TextButton(onClick = onRefreshHomework, enabled = !homeworkLoading) { Text("Yenile") }
+            }
+            Box {
+                TextButton(onClick = { classMenuExpanded = true }) { Text("Şube: ${student.className} ▾") }
+                DropdownMenu(expanded = classMenuExpanded, onDismissRequest = { classMenuExpanded = false }) {
+                    availableClasses.forEach { option ->
+                        DropdownMenuItem(text = { Text(option) }, onClick = {
+                            onClassName(option)
+                            classMenuExpanded = false
+                        })
+                    }
+                }
+            }
+            if (homeworkLoading) CircularProgressIndicator()
+            if (homeworkMessage != null) Text(homeworkMessage, color = MaterialTheme.colorScheme.primary)
+            if (!homeworkLoading && visibleHomework.isEmpty()) Text("Bu şube için ödev yok.")
+        }
+        items(visibleHomework, key = { "homework-${it.id}" }) { item -> HomeworkCard(item) }
+        item {
+            Text("Cihazdaki Ders Videosu", style = MaterialTheme.typography.titleLarge)
             OfflineVideo(onStarted = onVideoStarted)
             if (acildi) Text("Video açıldı", color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+@Composable
+private fun HomeworkCard(homework: Homework) {
+    val context = LocalContext.current
+    val videoUrl = homework.videoUrl?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(homework.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            val target = listOfNotNull(homework.type, homework.section).joinToString(" • ")
+            if (target.isNotEmpty()) Text(target, style = MaterialTheme.typography.bodySmall)
+            if (videoUrl == null) {
+                Text("Video bağlantısı yok.", style = MaterialTheme.typography.bodySmall)
+            } else {
+                TextButton(onClick = {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(videoUrl))
+                    runCatching { context.startActivity(intent) }
+                }) { Text("Bağlantıyı aç") }
+            }
         }
     }
 }

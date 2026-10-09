@@ -16,3 +16,8 @@ Bu dosya Git'e eklenmez. Supabase ayarı olmadan uygulama derlenir ancak ölçü
 ## Ölçüm
 
 Emülatörde DEMO modu temsili RSRP, SINR, RSRQ ve 5,0–80,0 Mbps değerleri üretir. DEMO ölçümleri de `olcumler` tablosuna gönderilir. Gerçek cihazda DEMO modu kapatıldığında Android'in erişebildiği hücresel sinyal değerleri kullanılır; hız testi yapılmaz. Konum okunmaz; `enlem` ve `boylam` değerleri `0.0` gönderilir.
+## Web ödevlerinin mobilde görünmesi
+
+Mobil uygulama `public.odevler` tablosundan `id`, `baslik`, `video_url`, `sube` ve `odev_turu` alanlarını okur. Seçilen şubeye ve `Tüm şubeler` hedefli ödevlere yer verir. Şube seçimi bu prototipte cihazda saklanır; henüz öğrenci hesabı doğrulaması değildir.
+
+Son alınan ödev listesi cihazda saklanır ve bağlantı yokken gösterilir. `video_url` bağlantısı cihazın uygun uygulamasında açılır. Google arama bağlantıları doğrudan video değildir; çevrimdışı video oynatma için cihazdaki dosyayı seçme özelliği ayrıdır.
