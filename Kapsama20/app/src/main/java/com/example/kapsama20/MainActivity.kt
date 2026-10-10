@@ -16,6 +16,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -91,6 +101,14 @@ class MainActivity : ComponentActivity() {
 private fun StudentTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
     val dark = androidx.compose.foundation.isSystemInDarkTheme()
+    SideEffect {
+        (context as? android.app.Activity)?.window?.let { window ->
+            androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
+            }
+        }
+    }
     val colors = if (android.os.Build.VERSION.SDK_INT >= 31) {
         if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     } else {
@@ -337,7 +355,7 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
                     NavigationBarItem(
                         selected = tab == index,
                         onClick = { tab = index },
-                        icon = { Text(listOf("▦", "◉")[index]) },
+                        icon = { LearningIcon(measurement = index == 1) },
                         label = { Text(label) }
                     )
                 }
@@ -426,47 +444,167 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
 private fun LoginScreen(busy: Boolean, error: String?, onLogin: (String, String) -> Unit) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    val colors = MaterialTheme.colorScheme
     Column(
-        Modifier.fillMaxSize().padding(24.dp),
+        Modifier.fillMaxSize()
+            .background(Brush.verticalGradient(listOf(colors.primaryContainer.copy(alpha = 0.45f), colors.surface)))
+            .statusBarsPadding().navigationBarsPadding().imePadding()
+            .verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Öğrenci Girişi", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Surface(shape = RoundedCornerShape(24.dp), color = colors.primaryContainer) {
+            LearningIcon(modifier = Modifier.padding(20.dp).size(40.dp))
+        }
         Spacer(Modifier.height(20.dp))
-        OutlinedTextField(email, { email = it }, Modifier.fillMaxWidth(), label = { Text("E-posta") }, singleLine = true)
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Şifre") },
-            singleLine = true, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
-        )
-        if (error != null) {
-            Spacer(Modifier.height(8.dp))
-            Text(error, color = MaterialTheme.colorScheme.error)
-        }
-        Spacer(Modifier.height(16.dp))
-        Button(
-            onClick = { onLogin(email, password) },
-            enabled = !busy && email.isNotBlank() && password.isNotBlank(),
-            modifier = Modifier.fillMaxWidth().height(52.dp)
+        Text("Kapasite Haritası", style = MaterialTheme.typography.labelLarge, color = colors.primary)
+        Spacer(Modifier.height(8.dp))
+        Text("Eğitim her yerde.", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text("Ödevlerin ve bağlantın, tek bir yerde.", color = colors.onSurfaceVariant)
+        Spacer(Modifier.height(28.dp))
+        Card(
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow),
+            border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.6f))
         ) {
-            if (busy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-            else Text("Giriş yap")
+            Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("Öğrenci girişi", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                OutlinedTextField(
+                    email, { email = it }, Modifier.fillMaxWidth(), label = { Text("E-posta") },
+                    shape = RoundedCornerShape(16.dp), singleLine = true
+                )
+                OutlinedTextField(
+                    password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Şifre") },
+                    shape = RoundedCornerShape(16.dp), singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
+                )
+                if (error != null) Text(error, color = colors.error)
+                Button(
+                    onClick = { onLogin(email, password) },
+                    enabled = !busy && email.isNotBlank() && password.isNotBlank(),
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth().height(56.dp)
+                ) {
+                    if (busy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp,
+                        color = colors.onPrimary)
+                    else Text("Giriş yap", style = MaterialTheme.typography.titleMedium)
+                }
+            }
         }
-        Spacer(Modifier.height(12.dp))
-        Text("Hesap bilgilerini öğretmeninizden alın.", style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(20.dp))
+        Text("Hesap bilgilerini öğretmeninizden alın.", style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant)
     }
 }
 
 @Composable
 private fun TopBar(student: Student, query: String, onQuery: (String) -> Unit, onSignOut: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surface) {
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            // Uydurma ders listesinde arama yapan kutu kaldırıldı
-            Text("Kapasite Haritası", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(8.dp))
-            Surface(onClick = onSignOut, shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.secondaryContainer) {
+        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                LearningIcon(modifier = Modifier.padding(10.dp).size(22.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Kapasite Haritası", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Öğrenci alanı", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.secondaryContainer) {
                 Text(student.initials, Modifier.padding(10.dp), color = MaterialTheme.colorScheme.onSecondaryContainer)
             }
+            TextButton(onClick = onSignOut) { Text("Çıkış") }
+        }
+    }
+}
+
+/** Çizimler cihazda üretilir; görsel/font indirmek gerekmez. */
+@Composable
+private fun LearningIcon(measurement: Boolean = false, modifier: Modifier = Modifier.size(24.dp)) {
+    val color = MaterialTheme.colorScheme.primary
+    Canvas(modifier) {
+        val stroke = 2.dp.toPx()
+        if (measurement) {
+            listOf(0.35f, 0.58f, 0.82f).forEachIndexed { index, height ->
+                val x = size.width * (0.22f + index * 0.28f)
+                drawLine(color, Offset(x, size.height * 0.85f), Offset(x, size.height * (0.85f - height)),
+                    strokeWidth = stroke * 2, cap = StrokeCap.Round)
+            }
+        } else {
+            val path = androidx.compose.ui.graphics.Path().apply {
+                moveTo(size.width * 0.5f, size.height * 0.24f)
+                lineTo(size.width * 0.12f, size.height * 0.12f)
+                lineTo(size.width * 0.12f, size.height * 0.76f)
+                lineTo(size.width * 0.5f, size.height * 0.88f)
+                lineTo(size.width * 0.88f, size.height * 0.76f)
+                lineTo(size.width * 0.88f, size.height * 0.12f)
+                close()
+            }
+            drawPath(path, color, style = Stroke(stroke, cap = StrokeCap.Round))
+            drawLine(color, Offset(size.width * 0.5f, size.height * 0.24f),
+                Offset(size.width * 0.5f, size.height * 0.88f), strokeWidth = stroke)
+        }
+    }
+}
+
+@Composable
+private fun StatusPill(text: String, accent: Boolean = false) {
+    val colors = MaterialTheme.colorScheme
+    Surface(shape = RoundedCornerShape(50),
+        color = if (accent) colors.tertiaryContainer else colors.surfaceContainerHighest,
+        contentColor = if (accent) colors.onTertiaryContainer else colors.onSurfaceVariant) {
+        Text(text, Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun StudentHero(student: Student, homework: List<Homework>, submittedIds: List<Long>,
+    downloadedIds: List<Long>, loading: Boolean, details: String) {
+    val colors = MaterialTheme.colorScheme
+    val completed = homework.count { it.id in submittedIds }
+    val saved = homework.count { it.videoUrl != null && it.id in downloadedIds }
+    Card(shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = colors.primaryContainer)) {
+        Column(
+            Modifier.fillMaxWidth()
+                .background(Brush.linearGradient(listOf(colors.primaryContainer, colors.secondaryContainer)))
+                .drawBehind {
+                    drawCircle(colors.primary.copy(alpha = 0.05f), size.width * 0.38f,
+                        Offset(size.width * 1.05f, size.height * 0.08f))
+                }.padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("ÖĞRENME ALANIN", style = MaterialTheme.typography.labelMedium,
+                color = colors.onPrimaryContainer)
+            Text("İyi günler, ${student.name}", style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold, color = colors.onPrimaryContainer)
+            if (details.isNotBlank()) Text(details, style = MaterialTheme.typography.bodySmall,
+                color = colors.onPrimaryContainer)
+            if (!loading) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(homework.size to "Ödev", completed to "Gönderilen", saved to "İnen video").forEach { (count, label) ->
+                        Surface(Modifier.weight(1f), shape = RoundedCornerShape(16.dp),
+                            color = colors.surface.copy(alpha = 0.8f)) {
+                            Column(Modifier.padding(12.dp)) {
+                                Text(count.toString(), style = MaterialTheme.typography.headlineSmall,
+                                    fontWeight = FontWeight.Bold, color = colors.primary)
+                                Text(label, style = MaterialTheme.typography.labelSmall, color = colors.onSurface)
+                            }
+                        }
+                    }
+                }
+                if (homework.isNotEmpty()) {
+                    LinearProgressIndicator(progress = { completed.toFloat() / homework.size },
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(50)),
+                        color = colors.primary, trackColor = colors.onPrimaryContainer.copy(alpha = 0.12f))
+                    Text("$completed / ${homework.size} ödev öğretmene gönderildi",
+                        style = MaterialTheme.typography.labelMedium, color = colors.onPrimaryContainer)
+                }
+            } else Text("Ödevlerin yükleniyor…", style = MaterialTheme.typography.bodySmall,
+                color = colors.onPrimaryContainer)
         }
     }
 }
@@ -500,14 +638,13 @@ private fun HomeScreen(
                 student.className.takeIf { it != "Şube seçilmedi" }?.let { "Şube: $it" },
                 student.number.takeIf { it != "—" }?.let { "NO: $it" }
             ).joinToString(" • ")
-            if (studentDetails.isNotBlank()) Text(studentDetails, color = MaterialTheme.colorScheme.primary)
-            Text("İyi günler, ${student.name}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            StudentHero(student, visibleHomework, submittedHomeworkIds, downloadedIds, homeworkLoading, studentDetails)
         }
         // Elle yazılmış devamsızlık/yoklama kartları kaldırıldı (gerçek veri değildi)
         item {
             // Mobil veri kotası: çekim iyi olsa bile kota yetmezse video izlenemez
             var kotaMenu by remember { mutableStateOf(false) }
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+            Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Box {
                         TextButton(onClick = { kotaMenu = true }) {
@@ -582,9 +719,25 @@ private fun HomeworkCard(
     val context = LocalContext.current
     var oynat by remember { mutableStateOf(false) }
     val videoUrl = homework.videoUrl?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
-        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(homework.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+    ) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+                    LearningIcon(modifier = Modifier.padding(12.dp).size(24.dp))
+                }
+                Spacer(Modifier.weight(1f))
+                StatusPill(when {
+                    submitted -> "Gönderildi"
+                    submitting -> "Kuyrukta"
+                    downloaded -> "Telefonda hazır"
+                    else -> homework.type ?: "Ödev"
+                }, accent = submitted || downloaded)
+            }
+            Text(homework.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             val target = listOfNotNull(homework.type, homework.section).joinToString(" • ")
             if (target.isNotEmpty()) Text(target, style = MaterialTheme.typography.bodySmall)
             homework.dueAt?.let(::tarihYaz)?.let {
@@ -614,6 +767,8 @@ private fun HomeworkCard(
             Button(
                 onClick = onSubmit,
                 enabled = !submitted && !submitting,
+                shape = RoundedCornerShape(16.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (submitting) {
@@ -704,7 +859,8 @@ private fun MeasurementScreen(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text("Bağlantı Ölçümü", style = MaterialTheme.typography.headlineSmall)
+        Text("Bağlantını tanı", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("Ödevlerin için bağlantının durumunu gör.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(
             "Şebeke: ${reading?.technology ?: if (demoMode) "Demo" else "Kullanılamıyor"}" +
                 (reading?.ag?.let { if (it == "wifi") " · test Wi-Fi üzerinden" else " · test mobil veriyle" } ?: ""),
@@ -714,9 +870,9 @@ private fun MeasurementScreen(
             Text("Demo değerleri (temsili)", Modifier.weight(1f), fontWeight = FontWeight.Bold)
             Switch(checked = demoMode, onCheckedChange = onDemo, enabled = !measuring)
         }
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-            Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                Text("Giriş yapan öğrenci", style = MaterialTheme.typography.labelLarge)
+        Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+            Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("ÖLÇÜM SAHİBİ", style = MaterialTheme.typography.labelMedium)
                 Text(studentName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             }
         }
@@ -724,7 +880,7 @@ private fun MeasurementScreen(
         val cubuk = cubukMetni(reading?.level)
         val karar = reading?.let(::kararMetni)
         if (cubuk != null || karar != null) {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
+            Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (cubuk != null) Text("Telefonun çubuğu: $cubuk", style = MaterialTheme.typography.titleMedium)
                     Text(
@@ -754,6 +910,8 @@ private fun MeasurementScreen(
         if (!hasCellPermission && !demoMode) Button(onClick = requestPermission) { Text("Hücre verisi izni ver") }
         Button(
             onClick = onMeasure, enabled = !measuring,
+            shape = RoundedCornerShape(20.dp),
+            elevation = ButtonDefaults.buttonElevation(defaultElevation = 3.dp, pressedElevation = 0.dp),
             modifier = Modifier.fillMaxWidth().height(64.dp)
         ) {
             if (measuring) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp,
@@ -780,10 +938,13 @@ private fun MeasurementScreen(
 
 @Composable
 private fun MetricCard(label: String, value: String, modifier: Modifier) {
-    Card(modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
-        Column(Modifier.padding(12.dp)) {
-            Text(label, style = MaterialTheme.typography.labelMedium)
-            Text(value, fontWeight = FontWeight.Bold)
+    Card(modifier, shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary)
         }
     }
 }
@@ -808,3 +969,18 @@ private fun demoReading(): RadioReading {
         isDemo = true
     )
 }
+
+
+@Preview(name = "Öğrenci alanı", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun StudentHomePreview() {
+    StudentTheme {
+        HomeScreen(Modifier, Student("Ali Eren", "AE", "7-A", "482"), emptyList(), null, {}, false,
+            listOf(Homework(1, "Kesirlerle İşlemler", null, "Sadece mesaj", "7-A")), false, null,
+            emptyList(), emptyList(), {}, {}, {}, {}, emptyList(), "2 GB", {}, {})
+    }
+}
+
+@Preview(name = "Öğrenci girişi", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun StudentLoginPreview() { StudentTheme { LoginScreen(false, null) { _, _ -> } } }
