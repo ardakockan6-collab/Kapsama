@@ -15,7 +15,9 @@ data class Homework(
     val title: String,
     val videoUrl: String?,
     val type: String?,
-    val section: String?
+    val section: String?,
+    val dueAt: String? = null,      // son_tarih (ISO)
+    val sizeMb: Double? = null      // boyut_mb
 )
 
 data class HomeworkResult(
@@ -26,6 +28,13 @@ data class HomeworkResult(
 
 object HomeworkRepository {
     private const val CACHE_KEY = "homework_json"
+
+    fun markSubmitted(context: Context, studentId: String, homeworkId: Long) {
+        val prefs = context.getSharedPreferences("submitted_homework", Context.MODE_PRIVATE)
+        val saved = prefs.getStringSet(studentId, emptySet()).orEmpty().toMutableSet()
+        saved.add(homeworkId.toString())
+        prefs.edit().putStringSet(studentId, saved).apply()
+    }
 
     suspend fun load(context: Context): HomeworkResult = withContext(Dispatchers.IO) {
         val preferences = context.getSharedPreferences("homework", Context.MODE_PRIVATE)
@@ -38,7 +47,7 @@ object HomeworkRepository {
         var accessToken = AuthRepository.currentAccessToken(context)
             ?: return@withContext HomeworkResult(cached, true, "Oturum yenilenemedi; yeniden giriş yapın.")
 
-        val url = "$endpoint/rest/v1/odevler?select=id,baslik,video_url,sube,odev_turu&order=id.desc"
+        val url = "$endpoint/rest/v1/odevler?select=id,baslik,video_url,sube,odev_turu,son_tarih,boyut_mb&order=id.desc"
         try {
             var response = get(url, key, accessToken)
             if (response.code == 401) {
@@ -60,23 +69,28 @@ object HomeworkRepository {
     }
 
     suspend fun loadSubmittedIds(context: Context, studentId: String): Set<Long> = withContext(Dispatchers.IO) {
+        val prefs = context.getSharedPreferences("submitted_homework", Context.MODE_PRIVATE)
+        val cached = prefs.getStringSet(studentId, emptySet()).orEmpty().mapNotNull { it.toLongOrNull() }.toSet()
         val endpoint = BuildConfig.SUPABASE_URL.trimEnd('/')
         val key = BuildConfig.SUPABASE_ANON_KEY
-        if (!endpoint.startsWith("https://") || key.isBlank()) return@withContext emptySet()
-        var accessToken = AuthRepository.currentAccessToken(context) ?: return@withContext emptySet()
+        if (!endpoint.startsWith("https://") || key.isBlank()) return@withContext cached
+        var accessToken = AuthRepository.currentAccessToken(context) ?: return@withContext cached
         val encodedStudent = URLEncoder.encode(studentId, Charsets.UTF_8.name())
-        val url = "$endpoint/rest/v1/odev_durumu?select=odev_id&ogrenci_id=eq.$encodedStudent&acildi=eq.true"
+        val url = "$endpoint/rest/v1/odev_durumu?select=odev_id&ogrenci_id=eq.$encodedStudent&yapildi=eq.true"
         try {
             var response = get(url, key, accessToken)
             if (response.code == 401) {
-                accessToken = AuthRepository.currentAccessToken(context, forceRefresh = true) ?: return@withContext emptySet()
+                accessToken = AuthRepository.currentAccessToken(context, forceRefresh = true) ?: return@withContext cached
                 response = get(url, key, accessToken)
             }
-            if (response.code !in 200..299) return@withContext emptySet()
+            if (response.code !in 200..299) return@withContext cached
             val rows = JSONArray(response.body)
             buildSet { for (index in 0 until rows.length()) add(rows.getJSONObject(index).getLong("odev_id")) }
+                .also { prefs.edit().putStringSet(studentId, it.map(Long::toString).toSet()).apply() }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
-            emptySet()
+            cached
         }
     }
 
@@ -132,7 +146,9 @@ object HomeworkRepository {
                         title = row.optString("baslik").ifBlank { "Başlıksız ödev" },
                         videoUrl = row.optionalText("video_url"),
                         type = row.optionalText("odev_turu"),
-                        section = row.optionalText("sube")
+                        section = row.optionalText("sube"),
+                        dueAt = row.optionalText("son_tarih"),
+                        sizeMb = row.optDouble("boyut_mb").takeIf { it.isFinite() && it > 0 }
                     )
                 )
             }

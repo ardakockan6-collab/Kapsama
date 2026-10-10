@@ -16,6 +16,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,6 +42,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import android.net.Uri
 import android.content.Intent
 import android.widget.MediaController
@@ -53,15 +58,14 @@ data class CourseRecord(val course: String, val schedule: String, val teacher: S
 data class AbsenceReport(val teacher: String, val note: String, val sentAt: Long)
 data class RadioReading(
     val rsrp: Int?, val sinr: Int?, val rsrq: Int?, val technology: String,
-    val mbps: Double? = null, val isDemo: Boolean = false
+    val mbps: Double? = null, val isDemo: Boolean = false,
+    val upMbps: Double? = null,   // yükleme hızı
+    val pingMs: Double? = null,   // gecikme
+    val level: Int? = null,       // telefonun gösterdiği çubuk (0–4)
+    val ag: String? = null        // "wifi" / "mobil"
 )
 
-private val records = listOf(
-    CourseRecord("Fizik Laboratuvarı", "Salı • 09:40", "Ahmet Hoca", "Kaçırıldı"),
-    CourseRecord("Matematik", "Dün • 11:30", "Ayşe Hoca", "Kaçırıldı"),
-    CourseRecord("Kimya", "Bugün • 10:20", "Mehmet Hoca", "İnceleniyor"),
-    CourseRecord("Türkçe", "Pazartesi • 13:00", "Elif Hoca", "Katıldı")
-)
+private val records = emptyList<CourseRecord>()
 
 class MainActivity : ComponentActivity() {
     private val permission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -157,6 +161,19 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
     val submittingHomeworkIds = remember { mutableStateListOf<Long>() }
     var uploadId by remember { mutableStateOf<java.util.UUID?>(null) }
     var uploadIsDemo by remember { mutableStateOf(false) }
+    val downloadedIds = remember { mutableStateListOf<Long>() }
+    var kota by remember(session.id) { mutableStateOf(KotaTercihi.oku(context, session.id)) }
+
+    fun bendekiOdevler(liste: List<Homework>) = liste.filter { item ->
+        item.section == null || item.section.equals("Tüm şubeler", ignoreCase = true) ||
+            item.section.equals(className, ignoreCase = true)
+    }
+
+    fun indirilenleriTara() {
+        val bulunan = homework.filter { OdevDosyalari.indirildiMi(context, it.id) }.map { it.id }
+        downloadedIds.clear()
+        downloadedIds.addAll(bulunan)
+    }
 
     suspend fun refreshHomework() {
         homeworkLoading = true
@@ -168,6 +185,20 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
         submittedHomeworkIds.addAll(remoteSubmitted)
         homeworkMessage = result.message
         homeworkLoading = false
+        // Videolar Wi-Fi'a bağlanınca kendiliğinden iner; mesaj ödevleri liste ile zaten telefonda
+        for (odev in bendekiOdevler(homework)) {
+            if (odev.videoUrl == null) OdevDosyalari.mesajAlindi(context, session.id, odev.id)
+            else OdevDosyalari.planla(context, session.id, odev)
+        }
+        indirilenleriTara()
+    }
+
+    // Ödev saati ölçümü: her akşam 19–23 arası arka planda
+    LaunchedEffect(session.id) { AksamOlcumWorker.planla(context) }
+
+    // Bir indirme bitince listeyi güncelle
+    LaunchedEffect(Unit) {
+        WorkManager.getInstance(context).getWorkInfosByTagFlow(OdevDosyalari.ETIKET).collect { indirilenleriTara() }
     }
 
     fun submitHomework(homeworkId: Long) {
@@ -176,25 +207,34 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .setInputData(workDataOf(
                 HomeworkSubmitWorker.KEY_HOMEWORK_ID to homeworkId,
-                HomeworkSubmitWorker.KEY_STUDENT_ID to session.id
+                HomeworkSubmitWorker.KEY_STUDENT_ID to session.id,
+                HomeworkSubmitWorker.KEY_TIME to System.currentTimeMillis()
             ))
+            .addTag("homework-submit-${session.id}")
+            .addTag("homework-id-$homeworkId")
             .build()
         submittingHomeworkIds.add(homeworkId)
         homeworkMessage = "Ödev öğretmene gönderilmek üzere kuyruğa alındı."
         WorkManager.getInstance(context).enqueueUniqueWork(
             "homework-${session.id}-$homeworkId",
-            ExistingWorkPolicy.REPLACE,
+            ExistingWorkPolicy.KEEP,
             work
         )
-        scope.launch {
-            val info = WorkManager.getInstance(context).getWorkInfoByIdFlow(work.id)
-                .first { it != null && it.state.isFinished }
-            submittingHomeworkIds.remove(homeworkId)
-            if (info?.state == WorkInfo.State.SUCCEEDED) {
-                if (homeworkId !in submittedHomeworkIds) submittedHomeworkIds.add(homeworkId)
-                homeworkMessage = "Ödev öğretmene gönderildi."
-            } else {
-                homeworkMessage = info?.outputData?.getString("error") ?: "Ödev gönderilemedi."
+    }
+
+    LaunchedEffect(session.id) {
+        WorkManager.getInstance(context).getWorkInfosByTagFlow("homework-submit-${session.id}").collect { jobs ->
+            submittingHomeworkIds.clear()
+            jobs.forEach { info ->
+                val homeworkId = info.tags.firstOrNull { it.startsWith("homework-id-") }
+                    ?.removePrefix("homework-id-")?.toLongOrNull() ?: return@forEach
+                when {
+                    !info.state.isFinished -> submittingHomeworkIds.add(homeworkId)
+                    info.state == WorkInfo.State.SUCCEEDED -> {
+                        if (homeworkId !in submittedHomeworkIds) submittedHomeworkIds.add(homeworkId)
+                    }
+                    info.state == WorkInfo.State.FAILED -> homeworkMessage = info.outputData.getString("error") ?: "Ödev gönderilemedi."
+                }
             }
         }
     }
@@ -215,34 +255,36 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
         }
     }
 
-    suspend fun measure() {
-        if (measuring || (!hasCellPermission && !demoMode)) return
+    /* hizTestiYap: elle "Ölç" basınca true (≈3,5 MB veri); otomatik modda false (sadece sinyal, veri harcamaz) */
+    suspend fun measure(hizTestiYap: Boolean) {
+        if (measuring) return
         measuring = true
         try {
-            val value = if (demoMode) demoReading() else withContext(Dispatchers.IO) { readRadio(context) }
+            var value = if (demoMode) demoReading() else if (hasCellPermission) withContext(Dispatchers.IO) {
+                try { readRadio(context) } catch (_: SecurityException) { null }
+            } else null
+            if (!demoMode && hizTestiYap) {
+                message = "Hız testi yapılıyor (yaklaşık 3,5 MB veri)…"
+                val hiz = HizTesti.calistir(context)
+                value = (value ?: RadioReading(null, null, null, "Bilinmiyor"))
+                    .copy(mbps = hiz.indirmeMbps, upMbps = hiz.yuklemeMbps, pingMs = hiz.pingMs, ag = hiz.ag)
+            }
             reading = value
-            if (value == null || listOf(value.rsrp, value.sinr, value.rsrq).all { it == null }) {
-                message = "Hücre ölçümü kullanılamıyor; kayıt oluşturulmadı."
+            val okuma = value
+            if (okuma == null || (listOf(okuma.rsrp, okuma.sinr, okuma.rsrq).all { it == null } && okuma.mbps == null && okuma.pingMs == null)) {
+                message = "Ölçüm alınamadı; kayıt oluşturulmadı."
             } else {
-                val work = OneTimeWorkRequestBuilder<UploadWorker>()
-                    .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-                    .setInputData(workDataOf(
-                        UploadWorker.KEY_STUDENT_ID to session.id,
-                        "rsrp" to (value.rsrp ?: Int.MIN_VALUE),
-                        "sinr" to (value.sinr ?: Int.MIN_VALUE),
-                        "rsrq" to (value.rsrq ?: Int.MIN_VALUE),
-                        "mbps" to (value.mbps ?: Double.NaN),
-                        "demo" to value.isDemo,
-                        "time" to System.currentTimeMillis()
-                    ))
-                    .build()
                 if (BuildConfig.SUPABASE_URL.isBlank() || BuildConfig.SUPABASE_ANON_KEY.isBlank()) {
                     message = "Ölçüm alındı. Supabase ayarlanmadığı için gönderilmedi."
                 } else {
+                    val work = olcumIsi(session.id, okuma)
                     WorkManager.getInstance(context).enqueue(work)
-                    uploadIsDemo = value.isDemo
+                    uploadIsDemo = okuma.isDemo
                     uploadId = work.id
-                    message = if (value.isDemo) "DEMO: Supabase kuyruğuna alındı." else "Ölçüm yerel kuyruğa alındı; bağlantı varsa gönderilecek."
+                    message = when {
+                        okuma.isDemo -> "DEMO: Supabase kuyruğuna alındı (simülasyon olarak işaretli)."
+                        else -> "Ölçüm yerel kuyruğa alındı; bağlantı varsa gönderilecek."
+                    }
                 }
             }
         } catch (e: SecurityException) {
@@ -252,17 +294,34 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
         }
     }
 
-    LaunchedEffect(auto, hasCellPermission, session.id, demoMode) {
-        while (auto && (hasCellPermission || demoMode)) {
-            measure()
+    var visible by remember { mutableStateOf(true) }
+    DisposableEffect(context) {
+        val lifecycle = (context as ComponentActivity).lifecycle
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_START) visible = true
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) visible = false
+        }
+        visible = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(auto, visible, hasCellPermission, session.id, demoMode) {
+        while (auto && visible && (hasCellPermission || demoMode)) {
+            measure(hizTestiYap = false)
             delay(10_000)
         }
     }
 
+    // Canlı sinyal göstergesi; son hız testinin sonuçları ekranda kalsın
     LaunchedEffect(hasCellPermission, demoMode) {
         while (hasCellPermission && !demoMode) {
-            try { reading = withContext(Dispatchers.IO) { readRadio(context) } }
-            catch (_: SecurityException) { reading = null }
+            try {
+                val yeni = withContext(Dispatchers.IO) { readRadio(context) }
+                val eski = reading
+                reading = if (yeni != null && eski != null) {
+                    yeni.copy(mbps = eski.mbps, upMbps = eski.upMbps, pingMs = eski.pingMs, ag = eski.ag)
+                } else yeni ?: eski
+            } catch (_: SecurityException) { reading = null }
             delay(2_000)
         }
     }
@@ -274,22 +333,15 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
         }) },
         bottomBar = {
             NavigationBar(modifier = Modifier.height(80.dp)) {
-                listOf("Derslerim", "Yoklama", "Rapor").forEachIndexed { index, label ->
+                listOf("Ödevlerim", "Ölçüm").forEachIndexed { index, label ->
                     NavigationBarItem(
                         selected = tab == index,
                         onClick = { tab = index },
-                        icon = { Text(listOf("▦", "◉", "▤")[index]) },
+                        icon = { Text(listOf("▦", "◉")[index]) },
                         label = { Text(label) }
                     )
                 }
             }
-        },
-        floatingActionButton = {
-            if (tab == 0) FloatingActionButton(
-                onClick = { showNewLog = true },
-                modifier = Modifier.size(56.dp),
-                shape = RoundedCornerShape(16.dp)
-            ) { Text("+", style = MaterialTheme.typography.headlineMedium) }
         }
     ) { padding ->
         when (tab) {
@@ -307,9 +359,20 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
                 onClassName = { selected ->
                     className = selected
                     prefs.edit().putString("class_name_${session.id}", selected).apply()
+                    scope.launch { refreshHomework() }
                 },
                 onRefreshHomework = { scope.launch { refreshHomework() } },
-                onVideoStarted = { acildi = true }
+                onVideoStarted = { acildi = true },
+                downloadedIds = downloadedIds,
+                kota = kota,
+                onKota = { secim ->
+                    kota = secim
+                    scope.launch {
+                        KotaTercihi.kaydet(context, session.id, secim)
+                        homeworkMessage = "Kota telefona kaydedildi; bağlantı gelince öğretmene gönderilecek."
+                    }
+                },
+                onOpened = { odevId -> scope.launch { OdevDosyalari.acildi(context, session.id, odevId) } }
             )
             1 -> MeasurementScreen(
                 Modifier.padding(padding), currentStudent.name, reading, measuring, auto, { auto = it }, demoMode, { selected ->
@@ -317,8 +380,12 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
                     reading = null
                     message = if (selected) "DEMO: Değerler temsili olacak." else ""
                 },
-                hasCellPermission, requestPermission, onMeasure = { scope.launch { measure() } },
-                message = message
+                hasCellPermission, requestPermission, onMeasure = { scope.launch { measure(hizTestiYap = true) } },
+                message = message,
+                onAksamDene = {
+                    AksamOlcumWorker.simdiCalistir(context)
+                    message = "Ödev saati ölçümü kuyruğa alındı; Android bağlantı ve pil koşullarına göre çalıştırır."
+                }
             )
             else -> ReportScreen(Modifier.padding(padding), records + localRecords, notice)
         }
@@ -394,19 +461,8 @@ private fun LoginScreen(busy: Boolean, error: String?, onLogin: (String, String)
 private fun TopBar(student: Student, query: String, onQuery: (String) -> Unit, onSignOut: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surface) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextField(
-                value = query, onValueChange = onQuery, singleLine = true,
-                modifier = Modifier.weight(1f), shape = RoundedCornerShape(28.dp),
-                placeholder = { Text("Ders, öğretmen veya...") },
-                leadingIcon = { Text("☰", style = MaterialTheme.typography.titleLarge) },
-                trailingIcon = { Text("🎙") },
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent
-                )
-            )
+            // Uydurma ders listesinde arama yapan kutu kaldırıldı
+            Text("Kapasite Haritası", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Spacer(Modifier.width(8.dp))
             Surface(onClick = onSignOut, shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.secondaryContainer) {
                 Text(student.initials, Modifier.padding(10.dp), color = MaterialTheme.colorScheme.onSecondaryContainer)
@@ -423,7 +479,9 @@ private fun HomeScreen(
     submittedHomeworkIds: List<Long>, submittingHomeworkIds: List<Long>,
     onSubmitHomework: (Long) -> Unit,
     onClassName: (String) -> Unit,
-    onRefreshHomework: () -> Unit, onVideoStarted: () -> Unit
+    onRefreshHomework: () -> Unit, onVideoStarted: () -> Unit,
+    downloadedIds: List<Long>, kota: String?, onKota: (String) -> Unit,
+    onOpened: (Long) -> Unit
 ) {
     val visibleHomework = homework.filter { item ->
         item.section == null || item.section.equals("Tüm şubeler", ignoreCase = true) ||
@@ -435,33 +493,42 @@ private fun HomeScreen(
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
             val studentDetails = listOfNotNull(
-                student.gradeLevel?.let { "$it. sınıf" },
+                // ogrenci_sinif tablosundaki değer okul sınıfı değil, evdeki bağlantı sınıfıdır (1–4)
+                student.gradeLevel?.let { s ->
+                    "Evden bağlantı: " + (listOf("Canlı ders", "Video", "Sadece mesaj", "Bağlantı yok").getOrNull(s - 1) ?: "?")
+                },
                 student.className.takeIf { it != "Şube seçilmedi" }?.let { "Şube: $it" },
                 student.number.takeIf { it != "—" }?.let { "NO: $it" }
             ).joinToString(" • ")
             if (studentDetails.isNotBlank()) Text(studentDetails, color = MaterialTheme.colorScheme.primary)
             Text("İyi günler, ${student.name}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         }
+        // Elle yazılmış devamsızlık/yoklama kartları kaldırıldı (gerçek veri değildi)
         item {
-            Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
-                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Haftalık Devamsızlık & Durum", style = MaterialTheme.typography.titleLarge)
-                    Text("Bu hafta 2 kaçırılan ders tespit edildi. Toplam devamsızlık: 3.5 gün (Sınır: 10 gün)")
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AssistChip(onClick = {}, label = { Text("2 Kaçırılan Ders") })
-                        AssistChip(onClick = {}, label = { Text("Son: Fizik Lab") })
+            // Mobil veri kotası: çekim iyi olsa bile kota yetmezse video izlenemez
+            var kotaMenu by remember { mutableStateOf(false) }
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Box {
+                        TextButton(onClick = { kotaMenu = true }) {
+                            Text("Aylık mobil veri kotan: ${kota ?: "seçilmedi"} ▾", fontWeight = FontWeight.Bold)
+                        }
+                        DropdownMenu(expanded = kotaMenu, onDismissRequest = { kotaMenu = false }) {
+                            KotaTercihi.SECENEKLER.forEach { secim ->
+                                DropdownMenuItem(text = { Text(secim) }, onClick = {
+                                    onKota(secim)
+                                    kotaMenu = false
+                                })
+                            }
+                        }
                     }
+                    Text(
+                        "Videolar Android’in kotasız olarak işaretlediği ağda otomatik indirilir. Kotanı öğretmenle paylaşabilirsin.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
         }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                ActionCard("⚠", "2 Ders", "Kaçırılan Dersler", "Fizik (Salı), Mat (Dün)", Modifier.weight(1f), {})
-                ActionCard("➤", if (notice == null) "Bildir" else "Taslak", "Öğretmene Bildir", "Ahmet Hoca • 09:40", Modifier.weight(1f), onNotice)
-            }
-        }
-        item { Text("Ders Katılım Geçmişi", style = MaterialTheme.typography.titleLarge) }
-        items(records) { record -> CourseRow(record) }
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("Yayınlanan Ödevler", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
@@ -487,32 +554,61 @@ private fun HomeScreen(
                 homework = item,
                 submitted = item.id in submittedHomeworkIds,
                 submitting = item.id in submittingHomeworkIds,
-                onSubmit = { onSubmitHomework(item.id) }
+                onSubmit = { onSubmitHomework(item.id) },
+                downloaded = item.id in downloadedIds,
+                kota = kota,
+                onOpened = {
+                    onVideoStarted()
+                    onOpened(item.id)
+                }
             )
         }
-        item {
-            Text("Cihazdaki Ders Videosu", style = MaterialTheme.typography.titleLarge)
-            OfflineVideo(onStarted = onVideoStarted)
-            if (acildi) Text("Video açıldı", color = MaterialTheme.colorScheme.primary)
-        }
+        // "Cihazdaki videoyu seç" kaldırıldı: videolar artık Wi-Fi'da kendiliğinden iner
     }
 }
 
+/* Son teslim: "12 Eki, 23:59" */
+private fun tarihYaz(iso: String): String? = runCatching {
+    java.time.OffsetDateTime.parse(iso)
+        .atZoneSameInstant(java.time.ZoneId.systemDefault())
+        .format(java.time.format.DateTimeFormatter.ofPattern("d MMM, HH:mm", java.util.Locale.forLanguageTag("tr")))
+}.getOrNull()
+
 @Composable
-private fun HomeworkCard(homework: Homework, submitted: Boolean, submitting: Boolean, onSubmit: () -> Unit) {
+private fun HomeworkCard(
+    homework: Homework, submitted: Boolean, submitting: Boolean, onSubmit: () -> Unit,
+    downloaded: Boolean, kota: String?, onOpened: () -> Unit
+) {
     val context = LocalContext.current
+    var oynat by remember { mutableStateOf(false) }
     val videoUrl = homework.videoUrl?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(homework.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             val target = listOfNotNull(homework.type, homework.section).joinToString(" • ")
             if (target.isNotEmpty()) Text(target, style = MaterialTheme.typography.bodySmall)
-            if (videoUrl == null) {
-                Text("Video bağlantısı yok.", style = MaterialTheme.typography.bodySmall)
-            } else {
-                TextButton(onClick = {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(videoUrl))
-                    runCatching { context.startActivity(intent) }
+            homework.dueAt?.let(::tarihYaz)?.let {
+                Text("Son teslim: $it", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            }
+            val boyut = homework.sizeMb?.let { "%.0f MB".format(it) }
+            when {
+                videoUrl == null -> Text("Videosuz ödev; metni telefonunda.", style = MaterialTheme.typography.bodySmall)
+                downloaded -> {
+                    Button(onClick = { oynat = true }, modifier = Modifier.fillMaxWidth()) { Text("İnternetsiz izle") }
+                    Text("Telefonda ✓ İnternet gerekmez.", style = MaterialTheme.typography.bodySmall)
+                }
+                OdevDosyalari.indirilebilir(videoUrl) -> {
+                    Text(
+                        "Kotasız ağa bağlanınca telefonuna inecek${boyut?.let { " ($it)" } ?: ""}.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    val yuzde = homework.sizeMb?.let { KotaTercihi.yuzde(kota, it) }
+                    TextButton(onClick = {
+                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(videoUrl))) }
+                    }) { Text("Şimdi internetten aç (mobil veri harcar${yuzde?.let { ", kotanın %$it'i" } ?: ""})") }
+                }
+                else -> TextButton(onClick = {
+                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(videoUrl))) }
                 }) { Text("Bağlantıyı aç") }
             }
             Button(
@@ -529,6 +625,41 @@ private fun HomeworkCard(homework: Homework, submitted: Boolean, submitting: Boo
                     submitting -> "Gönderiliyor"
                     else -> "Tamamladım, öğretmene gönder"
                 })
+            }
+        }
+    }
+    if (oynat) {
+        VideoOynatici(OdevDosyalari.dosya(context, homework.id), onDismiss = { oynat = false }, onStarted = onOpened)
+    }
+}
+
+/* Telefona inmiş videoyu internetsiz oynatır; dokununca durur/devam eder */
+@Composable
+private fun VideoOynatici(dosya: java.io.File, onDismiss: () -> Unit, onStarted: () -> Unit) {
+    var bildirildi by remember { mutableStateOf(false) }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Card {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                AndroidView(
+                    factory = { ctx ->
+                        VideoView(ctx).apply {
+                            setVideoPath(dosya.absolutePath)
+                            setOnPreparedListener { start() }
+                            setOnInfoListener { _, what, _ ->
+                                if (what == android.media.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START && !bildirildi) {
+                                    bildirildi = true
+                                    onStarted()
+                                }
+                                false
+                            }
+                            setOnClickListener { if (isPlaying) pause() else start() }
+                        }
+                    },
+                    onRelease = { it.stopPlayback() },
+                    modifier = Modifier.fillMaxWidth().height(240.dp)
+                )
+                Text("Videoya dokununca durur / devam eder.", style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("Kapat") }
             }
         }
     }
@@ -566,14 +697,22 @@ private fun MeasurementScreen(
     measuring: Boolean, auto: Boolean, onAuto: (Boolean) -> Unit,
     demoMode: Boolean, onDemo: (Boolean) -> Unit,
     hasCellPermission: Boolean, requestPermission: () -> Unit,
-    onMeasure: () -> Unit, message: String
+    onMeasure: () -> Unit, message: String,
+    onAksamDene: () -> Unit
 ) {
-    Column(modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-        Text("Yoklama ve Sinyal Ölçümü", style = MaterialTheme.typography.headlineSmall)
-        Text("Şebeke: ${reading?.technology ?: if (demoMode) "Demo" else "Kullanılamıyor"}", color = MaterialTheme.colorScheme.primary)
+    Column(
+        modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text("Bağlantı Ölçümü", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            "Şebeke: ${reading?.technology ?: if (demoMode) "Demo" else "Kullanılamıyor"}" +
+                (reading?.ag?.let { if (it == "wifi") " · test Wi-Fi üzerinden" else " · test mobil veriyle" } ?: ""),
+            color = MaterialTheme.colorScheme.primary
+        )
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("Demo değerleri (temsili)", Modifier.weight(1f), fontWeight = FontWeight.Bold)
-            Switch(checked = demoMode, onCheckedChange = onDemo)
+            Switch(checked = demoMode, onCheckedChange = onDemo, enabled = !measuring)
         }
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
             Column(Modifier.fillMaxWidth().padding(16.dp)) {
@@ -581,37 +720,60 @@ private fun MeasurementScreen(
                 Text(studentName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             }
         }
+        // Tezimiz: çubuk dolu olabilir ama ödev için yetmeyebilir
+        val cubuk = cubukMetni(reading?.level)
+        val karar = reading?.let(::kararMetni)
+        if (cubuk != null || karar != null) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (cubuk != null) Text("Telefonun çubuğu: $cubuk", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Ödev için: ${karar ?: "hız testi yapınca görünür"}",
+                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             MetricCard("RSRP", reading?.rsrp?.let { "$it dBm" } ?: "Veri yok", Modifier.weight(1f))
             MetricCard("SINR", reading?.sinr?.let { "$it dB" } ?: "Veri yok", Modifier.weight(1f))
+            MetricCard("RSRQ", reading?.rsrq?.let { "$it dB" } ?: "Veri yok", Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MetricCard("RSRQ", reading?.rsrq?.let { "$it dB" } ?: "Veri yok", Modifier.weight(1f))
-            MetricCard("Hız", reading?.mbps?.let { "%.1f Mbps".format(it) } ?: "Veri yok", Modifier.weight(1f))
+            MetricCard("İndirme", reading?.mbps?.let { "%.1f Mbps".format(it) } ?: "—", Modifier.weight(1f))
+            MetricCard("Yükleme", reading?.upMbps?.let { "%.2f Mbps".format(it) } ?: "—", Modifier.weight(1f))
+            MetricCard("HTTP gecikme", reading?.pingMs?.let { "%.0f ms".format(it) } ?: "—", Modifier.weight(1f))
         }
-        if (!demoMode && reading != null && (reading.sinr == null || reading.rsrq == null || reading.mbps == null)) {
+        if (!demoMode && reading != null && (reading.sinr == null || reading.rsrq == null)) {
             Text(
-                "Cihaz bazı sinyal değerlerini bildirmiyor. Hız testi yapılmadığından gerçek Mbps verisi yok.",
+                "Cihaz bazı sinyal değerlerini bildirmiyor.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         if (!hasCellPermission && !demoMode) Button(onClick = requestPermission) { Text("Hücre verisi izni ver") }
         Button(
-            onClick = onMeasure, enabled = (hasCellPermission || demoMode) && !measuring,
+            onClick = onMeasure, enabled = !measuring,
             modifier = Modifier.fillMaxWidth().height(64.dp)
         ) {
             if (measuring) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp,
                 color = MaterialTheme.colorScheme.onPrimary)
-            else Text("Ölç", style = MaterialTheme.typography.titleLarge)
+            else Text(if (demoMode) "Ölç (demo)" else "Ölç + hız testi (~3,5 MB)", style = MaterialTheme.typography.titleMedium)
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Otomatik mod", fontWeight = FontWeight.Bold)
-                Text("Uygulama açıkken her 10 saniyede bir")
+                Text("Ekran açıkken her 10 saniyede sinyal; hız testi yapılmaz", style = MaterialTheme.typography.bodySmall)
             }
             Switch(checked = auto, onCheckedChange = onAuto, enabled = hasCellPermission || demoMode)
         }
+        OutlinedButton(onClick = onAksamDene, enabled = !demoMode, modifier = Modifier.fillMaxWidth()) {
+            Text("Ödev saati ölçümünü şimdi dene")
+        }
+        Text(
+            "Akşam 19:00–23:00 arasında denenir; Android pil tasarrufu işi geciktirebilir. Konum okunmaz. Kota seçilmediyse veya 2 GB ve altındaysa arka planda mobil hız testi yapılmaz.",
+            style = MaterialTheme.typography.bodySmall
+        )
         if (message.isNotBlank()) Text(message, color = MaterialTheme.colorScheme.primary)
     }
 }
@@ -633,57 +795,6 @@ private fun ReportScreen(modifier: Modifier, records: List<CourseRecord>, notice
         Text("Kaçırılan ders: ${records.count { it.status == "Kaçırıldı" }}")
         Text("Öğretmen bildirimi: ${if (notice == null) "Henüz yok" else "Taslak"}")
     }
-}
-
-@Composable
-private fun OfflineVideo(onStarted: () -> Unit) {
-    val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("student", Context.MODE_PRIVATE) }
-    var uri by remember { mutableStateOf(prefs.getString("video_uri", null)?.let(Uri::parse)) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { chosen ->
-        if (chosen != null) {
-            context.contentResolver.takePersistableUriPermission(chosen, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            prefs.edit().putString("video_uri", chosen.toString()).apply()
-            uri = chosen
-        }
-    }
-    Button(onClick = { picker.launch(arrayOf("video/*")) }) { Text("Cihazdaki videoyu seç") }
-    val selected = uri ?: return
-    AndroidView(factory = { ctx ->
-        VideoView(ctx).apply {
-            setVideoURI(selected)
-            setMediaController(MediaController(ctx))
-            setOnPreparedListener { start() }
-            setOnInfoListener { _, what, _ ->
-                if (what == android.media.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) onStarted()
-                false
-            }
-        }
-    }, update = { view -> if (view.tag != selected) {
-        view.tag = selected
-        view.setVideoURI(selected)
-    } }, modifier = Modifier.fillMaxWidth().height(220.dp))
-}
-
-private fun readRadio(context: Context): RadioReading? {
-    val manager = context.getSystemService(TelephonyManager::class.java) ?: return null
-    val cells = manager.allCellInfo ?: return null
-    fun valid(value: Int) = value.takeUnless { it == CellInfo.UNAVAILABLE }
-    if (android.os.Build.VERSION.SDK_INT >= 29) {
-        val nr = cells.filterIsInstance<CellInfoNr>().firstOrNull { it.isRegistered }
-        if (nr != null) {
-            val signal = manager.signalStrength
-                ?.getCellSignalStrengths(CellSignalStrengthNr::class.java)?.firstOrNull()
-                ?: (nr.cellSignalStrength as CellSignalStrengthNr)
-            return RadioReading(valid(signal.ssRsrp), valid(signal.ssSinr), valid(signal.ssRsrq), "5G NR")
-        }
-    }
-    val lte = cells.filterIsInstance<CellInfoLte>().firstOrNull { it.isRegistered } ?: return null
-    val signal = if (android.os.Build.VERSION.SDK_INT >= 29) {
-        manager.signalStrength?.getCellSignalStrengths(CellSignalStrengthLte::class.java)?.firstOrNull()
-            ?: lte.cellSignalStrength
-    } else lte.cellSignalStrength
-    return RadioReading(valid(signal.rsrp), valid(signal.rssnr), valid(signal.rsrq), "4G LTE")
 }
 
 private fun demoReading(): RadioReading {

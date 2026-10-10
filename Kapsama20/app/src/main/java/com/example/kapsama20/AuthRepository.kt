@@ -1,6 +1,9 @@
 package com.example.kapsama20
 
 import android.content.Context
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -19,6 +22,11 @@ data class AuthSession(
 )
 
 object AuthRepository {
+    private val refreshMutex = Mutex()
+
+    fun isCurrentStudent(context: Context, studentId: String): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("student_id", null) == studentId
+
     private const val PREFS = "student_auth"
 
     suspend fun signIn(context: Context, email: String, password: String): AuthSession =
@@ -31,24 +39,28 @@ object AuthRepository {
             sessionFrom(json).also { save(context, it) }
         }
 
-    suspend fun restore(context: Context): AuthSession? = withContext(Dispatchers.IO) {
+    suspend fun restore(context: Context, forceRefresh: Boolean = false): AuthSession? = withContext(Dispatchers.IO) { refreshMutex.withLock {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val refresh = prefs.getString("refresh_token", null) ?: return@withContext null
+        val refresh = prefs.getString("refresh_token", null) ?: return@withLock null
+        val cached = cachedSession(prefs, refresh)
+        if (!forceRefresh && cached != null && cached.expiresAt > System.currentTimeMillis() / 1000 + 60) return@withLock cached
         try {
             val endpoint = BuildConfig.SUPABASE_URL.trimEnd('/')
             val key = BuildConfig.SUPABASE_ANON_KEY
             val json = post("$endpoint/auth/v1/token?grant_type=refresh_token", key,
                 JSONObject().put("refresh_token", refresh))
-            sessionFrom(json).also { save(context, it) }
+            sessionFrom(json).takeIf { prefs.getString("refresh_token", null) == refresh }?.also { save(context, it) }
         } catch (e: AuthApiException) {
-            if (e.statusCode in 400..499) {
-                prefs.edit().clear().apply()
+            if (e.statusCode in listOf(400, 401, 403)) {
+                if (prefs.getString("refresh_token", null) == refresh) prefs.edit().clear().apply()
                 null
             } else cachedSession(prefs, refresh)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             cachedSession(prefs, refresh)
         }
-    }
+    } }
 
     fun signOut(context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
@@ -61,7 +73,7 @@ object AuthRepository {
         if (!forceRefresh && cachedToken.isNotBlank() && expiresAt > System.currentTimeMillis() / 1000 + 60) {
             return cachedToken
         }
-        return restore(context)?.takeIf { it.expiresAt > System.currentTimeMillis() / 1000 }
+        return restore(context, forceRefresh)?.takeIf { it.expiresAt > System.currentTimeMillis() / 1000 }
             ?.accessToken?.takeIf { it.isNotBlank() }
     }
 
@@ -110,7 +122,8 @@ object AuthRepository {
             refreshToken = json.getString("refresh_token"),
             expiresAt = json.optLong("expires_at", System.currentTimeMillis() / 1000 + json.optLong("expires_in", 3600L)),
             className = metadata.optString("class_name").ifBlank { "Şube seçilmedi" },
-            studentNumber = studentId
+            // Ekranda görünen numara (1–30); yoksa öğrenci kodu gösterilir
+            studentNumber = metadata.optString("student_number").ifBlank { studentId }
         )
     }
 
