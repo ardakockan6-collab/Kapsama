@@ -37,6 +37,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -453,11 +455,11 @@ private fun LoginScreen(busy: Boolean, error: String?, onLogin: (String, String)
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Surface(shape = RoundedCornerShape(24.dp), color = colors.primaryContainer) {
-            LearningIcon(modifier = Modifier.padding(20.dp).size(40.dp))
+        Surface(shape = RoundedCornerShape(24.dp), color = Color(0xFFF8F7FC)) {
+            YoklaMark(modifier = Modifier.padding(20.dp).size(40.dp))
         }
         Spacer(Modifier.height(20.dp))
-        Text("Kapasite Haritası", style = MaterialTheme.typography.labelLarge, color = colors.primary)
+        Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = colors.onSurface)
         Spacer(Modifier.height(8.dp))
         Text("Eğitim her yerde.", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
@@ -503,12 +505,12 @@ private fun TopBar(student: Student, query: String, onQuery: (String) -> Unit, o
     Surface(color = MaterialTheme.colorScheme.surface) {
         Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                LearningIcon(modifier = Modifier.padding(10.dp).size(22.dp))
+            Surface(shape = RoundedCornerShape(14.dp), color = Color(0xFFF8F7FC)) {
+                YoklaMark(modifier = Modifier.padding(8.dp).size(26.dp))
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text("Kapasite Haritası", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text("Öğrenci alanı", style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -518,6 +520,13 @@ private fun TopBar(student: Student, query: String, onQuery: (String) -> Unit, o
             TextButton(onClick = onSignOut) { Text("Çıkış") }
         }
     }
+}
+
+/** Paylaşılan logonun dört çubuklu, çözünürlükten bağımsız simgesi. */
+@Composable
+private fun YoklaMark(modifier: Modifier = Modifier.size(32.dp)) {
+    Icon(painter = painterResource(R.drawable.ic_yokla_mark), contentDescription = null,
+        modifier = modifier, tint = Color.Unspecified)
 }
 
 /** Çizimler cihazda üretilir; görsel/font indirmek gerekmez. */
