@@ -1,6 +1,12 @@
-# SQL dosyaları — eski demo betikleri
+# SQL dosyaları
 
-Bu klasör, ekipten alınan dokuz SQL dosyasını özgün içerikleriyle saklar. Otomatik migration değildir; depoya eklenmeleri Supabase üzerinde çalıştırıldıkları anlamına gelmez.
+## Güncel mobil iyileştirme
+
+`iyilestirmeler.sql` yeni mobil sürüm için gerekli ölçüm, ödev ve kota alanlarını ekler; anonim erişimi kaldırıp öğrenciye ait ölçüm yazma politikasını kurar. Ekipten gelen dosya özgün haliyle saklanır. Mevcut Auth yardımcıları ve tablolar gereklidir. [Kurulum ve doğrulama](../mobile/README.md).
+
+## Eski demo betikleri
+
+Alttaki dokuz dosya eski demo arşividir. Otomatik migration değildir; depoya eklenmeleri Supabase üzerinde çalıştırıldıkları anlamına gelmez.
 
 ## İçerik
 
