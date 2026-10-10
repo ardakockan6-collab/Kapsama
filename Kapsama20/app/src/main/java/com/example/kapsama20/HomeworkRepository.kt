@@ -55,6 +55,11 @@ object HomeworkRepository {
                     ?: return@withContext HomeworkResult(cached, true, "Oturum süresi doldu; yeniden giriş yapın.")
                 response = get(url, key, accessToken)
             }
+            // Eski sunucuda yeni isteğe bağlı alanlar yoksa temel ödevleri yine göster.
+            val errorCode = runCatching { JSONObject(response.body).optString("code") }.getOrDefault("")
+            if (response.code == 400 && errorCode in listOf("42703", "PGRST204")) {
+                response = get("$endpoint/rest/v1/odevler?select=id,baslik,video_url,sube,odev_turu&order=id.desc", key, accessToken)
+            }
             if (response.code !in 200..299) {
                 return@withContext HomeworkResult(cached, true, "Ödevler alınamadı (HTTP ${response.code}).")
             }

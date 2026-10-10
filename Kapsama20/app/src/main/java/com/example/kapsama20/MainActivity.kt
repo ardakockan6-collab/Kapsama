@@ -80,8 +80,8 @@ data class RadioReading(
 private val records = emptyList<CourseRecord>()
 
 class MainActivity : ComponentActivity() {
-    private val permission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        hasCellPermission.value = granted
+    private val permission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        hasCellPermission.value = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true
     }
     private val hasCellPermission = mutableStateOf(false)
 
@@ -92,7 +92,9 @@ class MainActivity : ComponentActivity() {
             StudentTheme {
                 StudentApp(
                     hasCellPermission = hasCellPermission.value,
-                    requestPermission = { permission.launch(Manifest.permission.ACCESS_FINE_LOCATION) }
+                    requestPermission = { permission.launch(arrayOf(
+                        Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION
+                    )) }
                 )
             }
         }
@@ -268,7 +270,7 @@ private fun StudentApp(hasCellPermission: Boolean, requestPermission: () -> Unit
                 WorkInfo.State.SUCCEEDED -> if (uploadIsDemo) "DEMO: Supabase'e gönderildi." else "Supabase'e gönderildi."
                 WorkInfo.State.FAILED -> info.outputData.getString("error") ?: "Gönderim başarısız."
                 WorkInfo.State.RUNNING -> "Supabase'e gönderiliyor..."
-                WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> "Ölçüm kuyrukta; bağlantı bekleniyor."
+                WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> "Ölçüm kuyrukta; gönderim yeniden denenecek."
                 WorkInfo.State.CANCELLED -> "Gönderim iptal edildi."
                 null -> message
             }

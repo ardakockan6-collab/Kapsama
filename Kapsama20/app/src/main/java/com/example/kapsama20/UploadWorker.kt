@@ -52,6 +52,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 408, 429, in 500..599 -> Result.retry()
                 else -> {
                     val pgCode = try { JSONObject(response.body).optString("code") } catch (_: Exception) { "" }
+                    // Sunucu migration'ı bekleniyorsa ölçümü silme; tüm metrikleri kuyrukta koru.
+                    if (code == 400 && pgCode == "PGRST204") return@withContext Result.retry()
                     Result.failure(workDataOf("error" to "Supabase HTTP $code ($pgCode): tablo alanlarını ve yazma izinlerini kontrol edin."))
                 }
             }

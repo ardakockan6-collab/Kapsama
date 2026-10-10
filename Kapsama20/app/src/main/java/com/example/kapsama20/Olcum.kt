@@ -36,9 +36,20 @@ data class HizSonucu(
 
 /* ---------- Sinyal ---------- */
 internal fun readRadio(context: Context): RadioReading? {
+    if (context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) !=
+        android.content.pm.PackageManager.PERMISSION_GRANTED) return null
+    return try {
+        readRadioWithPermission(context)
+    } catch (_: SecurityException) {
+        null
+    }
+}
+
+@androidx.annotation.RequiresPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+private fun readRadioWithPermission(context: Context): RadioReading? {
     val manager = context.getSystemService(TelephonyManager::class.java) ?: return null
     val cells = manager.allCellInfo ?: return null
-    fun valid(value: Int) = value.takeUnless { it == CellInfo.UNAVAILABLE }
+    fun valid(value: Int) = value.takeUnless { it == Int.MAX_VALUE }
     if (android.os.Build.VERSION.SDK_INT >= 29) {
         val nr = cells.filterIsInstance<CellInfoNr>().firstOrNull { it.isRegistered }
         if (nr != null) {
